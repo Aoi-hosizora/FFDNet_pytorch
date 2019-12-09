@@ -41,7 +41,7 @@ class FFDNet(nn.Module):
         # Conv
         layers.append(nn.Conv2d(in_channels=self.num_feature_maps, out_channels=self.output_features, \
                                 kernel_size=self.kernel_size, padding=self.padding, bias=False))
-        self.itermediate_dncnn = nn.Sequential(*layers)
+        self.intermediate_dncnn = nn.Sequential(*layers)
 
     def forward(self, x, noise_sigma):
         x_cat = utils.downsample(x.data, noise_sigma.data)
