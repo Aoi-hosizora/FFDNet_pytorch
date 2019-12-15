@@ -16,7 +16,6 @@ import utils
 
 def read_image(image_path, is_gray):
     """
-    根据路径获取图像，并处理形状与归一化
     :return: Normalized Image (C * W * H)
     """
     if is_gray:
@@ -30,8 +29,7 @@ def read_image(image_path, is_gray):
 
 def load_images(is_train, is_gray, base_path):
     """
-    加载训练集或验证集图像
-    :param base_path: 根目录 ./train_data/
+    :param base_path: ./train_data/
     :return: List[Patches] (C * W * H)
     """
     if is_gray:
@@ -41,7 +39,8 @@ def load_images(is_train, is_gray, base_path):
         train_dir = 'rgb/train/'
         val_dir = 'rgb/val/'
     
-    image_dir = base_path + (train_dir if is_train else val_dir)
+    image_dir = base_path.replace('\'', '').replace('"', '') + (train_dir if is_train else val_dir)
+    print('> Loading images in ' + image_dir)
     images = []
     for fn in next(os.walk(image_dir))[2]:
         image = read_image(image_dir + fn, is_gray)
@@ -50,7 +49,6 @@ def load_images(is_train, is_gray, base_path):
 
 def images_to_patches(images, patch_size):
     """
-    将图片集合转化成等大的区域集合
     :param images: List[Image (C * W * H)]
     :param patch_size: int
     :return: (n * C * W * H)
@@ -103,25 +101,28 @@ def train(args):
     print('> Start training...')
     for epoch_idx in range(args.epoches):
         # Train
+        loss_idx = 0
+        train_losses = 0
         model.train()
+
+        start_time = time.time()
         for batch_idx, batch_data in enumerate(train_dataloader):
             # According to internal, add noise
             for int_noise_sigma in train_noises:
-                start_time = time.time()
-
                 noise_sigma = int_noise_sigma / 255
-                new_images = utils.add_batch_noise(batch_data.cpu(), noise_sigma)
+                new_images = utils.add_batch_noise(batch_data, noise_sigma)
                 noise_sigma = torch.FloatTensor(np.array([noise_sigma for idx in range(new_images.shape[0])]))
                 new_images = Variable(new_images)
                 noise_sigma = Variable(noise_sigma)
                 if args.cuda:
                     new_images = new_images.cuda()
                     noise_sigma = noise_sigma.cuda()
-                    batch_data = batch_data.cuda()
 
                 # Predict
                 images_pred = model(new_images, noise_sigma)
-                train_loss = loss_fn(images_pred, batch_data)
+                train_loss = loss_fn(images_pred, batch_data.to(images_pred.device))
+                train_losses += train_loss
+                loss_idx += 1
 
                 optimizer.zero_grad()
                 train_loss.backward()
@@ -131,44 +132,48 @@ def train(args):
                 stop_time = time.time()
                 all_num = len(train_dataloader) * len(train_noises)
                 done_num = batch_idx * len(train_noises) + train_noises.index(int_noise_sigma) + 1
-                rest_time = int((stop_time - start_time) * (all_num - done_num))
+                rest_time = int((stop_time - start_time) / done_num * (all_num - done_num))
                 percent = int(done_num / all_num * 100)
                 print(f'\rEpoch: {epoch_idx + 1} / {args.epoches}, ' +
                       f'Batch: {batch_idx + 1} / {len(train_dataloader)}, ' +
                       f'Noise_Sigma: {int_noise_sigma} / {train_noises[-1]}, ' +
                       f'Train_Loss: {train_loss}, ' +
                       f'=> {rest_time}s, {percent}%', end='')
+
+        train_losses /= loss_idx
+        print(f', Avg_Train_Loss: {train_losses}, All: {int(stop_time - start_time)}s')
         
-        print()
         # Evaluate
-        model.eval()
-        val_loss = 0
         loss_idx = 0
+        val_losses = 0
+        if (epoch_idx + 1) % args.val_epoch != 0:
+            continue
+        model.eval()
+        
+        start_time = time.time()
         for batch_idx, batch_data in enumerate(val_dataloader):
             # According to internal, add noise
             for int_noise_sigma in val_noises:
-                start_time = time.time()
-
                 noise_sigma = int_noise_sigma / 255
-                new_images = utils.add_batch_noise(batch_data.cpu(), noise_sigma)
+                new_images = utils.add_batch_noise(batch_data, noise_sigma)
                 noise_sigma = torch.FloatTensor(np.array([noise_sigma for idx in range(new_images.shape[0])]))
                 new_images = Variable(new_images)
                 noise_sigma = Variable(noise_sigma)
                 if args.cuda:
                     new_images = new_images.cuda()
                     noise_sigma = noise_sigma.cuda()
-                    batch_data = batch_data.cuda()
                 
                 # Predict
                 images_pred = model(new_images, noise_sigma)
-                val_loss += loss_fn(images_pred, batch_data)
+                val_loss = loss_fn(images_pred, batch_data.to(images_pred.device))
+                val_losses += val_loss
                 loss_idx += 1
                 
                 # Log Progress
                 stop_time = time.time()
                 all_num = len(val_dataloader) * len(val_noises)
                 done_num = batch_idx * len(val_noises) + val_noises.index(int_noise_sigma) + 1
-                rest_time = int((stop_time - start_time) * (all_num - done_num))
+                rest_time = int((stop_time - start_time) / done_num * (all_num - done_num))
                 percent = int(done_num / all_num * 100)
                 print(f'\rEpoch: {epoch_idx + 1} / {args.epoches}, ' +
                       f'Batch: {batch_idx + 1} / {len(val_dataloader)}, ' +
@@ -176,32 +181,43 @@ def train(args):
                       f'Val_Loss: {val_loss}, ' + 
                       f'=> {rest_time}s, {percent}%', end='')
                 
-        val_loss /= loss_idx
-        print(f'\n| Epoch: {epoch_idx}, Train_Loss: {train_loss}, Val_Loss: {val_loss}')
+        val_losses /= loss_idx
+        print(f', Avg_Val_Loss: {val_losses}, All: {int(stop_time - start_time)}s')
 
         # Save Checkpoint
         if (epoch_idx + 1) % args.save_checkpoints == 0:
             model_path = args.model_path + ('net_gray_checkpoint.pth' if args.is_gray else 'net_rgb_checkpoint.pth')
             torch.save(model.state_dict(), model_path)
-            print(f'Saved Checkpoint at Epoch {epoch_idx} in {model_path}')
+            print(f'| Saved Checkpoint at Epoch {epoch_idx + 1} to {model_path}')
 
     # Final Save Model Dict
+    model.eval()
     model_path = args.model_path + ('net_gray.pth' if args.is_gray else 'net_rgb.pth')
     torch.save(model.state_dict(), model_path)
     print(f'Saved State Dict in {model_path}')
+    print('\n')
 
 def test(args):
     # Image
     image = cv2.imread(args.test_path)
     if image is None:
-        raise Exception(f'File {image_path} not found or error')
+        raise Exception(f'File {args.test_path} not found or error')
     is_gray = utils.is_image_gray(image)
     image = read_image(args.test_path, is_gray)
     print("{} image shape: {}".format("Gray" if is_gray else "RGB", image.shape))
-    image = np.expand_dims(image, 0) # 1 * C(1 / 3) * W * H
-    image = torch.FloatTensor(image)
 
+    # Expand odd shape to even
+    expend_W = False
+    expend_H = False
+    if image.shape[1] % 2 != 0:
+        expend_W = True
+        image = np.concatenate((image, image[:, -1, :][:, np.newaxis, :]), axis=1)
+    if image.shape[2] % 2 != 0:
+        expend_H = True
+        image = np.concatenate((image, image[:, :, -1][:, :, np.newaxis]), axis=2)
+    
     # Noise
+    image = torch.FloatTensor([image]) # 1 * C(1 / 3) * W * H
     if args.add_noise:
         image = utils.add_batch_noise(image, args.noise_sigma)
     noise_sigma = torch.FloatTensor([args.noise_sigma])
@@ -214,11 +230,12 @@ def test(args):
         model = model.cuda()
 
     # Dict
-    print("> Loading model param...")
     model_path = args.model_path + ('net_gray.pth' if is_gray else 'net_rgb.pth')
+    print(f"> Loading model param in {model_path}...")
     state_dict = torch.load(model_path)
     model.load_state_dict(state_dict)
     model.eval()
+    print('\n')
     
     # Test
     with torch.no_grad():
@@ -228,8 +245,14 @@ def test(args):
         print("Test time: {0:.4f}s".format(stop_time - start_time))
 
     # PSNR
-    psnr = utils.batch_psnr(image_pred, image, 1)
+    psnr = utils.batch_psnr(img=image_pred, imclean=image, data_range=1)
     print("PSNR denoised {0:.2f}dB".format(psnr))
+
+    # UnExpand odd
+    if expend_W:
+        image_pred = image_pred[:, :, :-1, :]
+    if expend_H:
+        image_pred = image_pred[:, :, :, :-1]
 
     # Save
     cv2.imwrite("ffdnet.png", utils.variable_to_cv2_image(image_pred))
@@ -240,26 +263,27 @@ def main():
     parser = argparse.ArgumentParser()
 
     # Train
-    parser.add_argument("--train_path", type=str, default='./train_data/',                  help='图像存储路径')
-    parser.add_argument("--is_gray", action='store_true',                                   help='训练灰度图像')
-    parser.add_argument("--patch_size", type=int, default=32,                               help='训练集分割的区域大小')
-    parser.add_argument("--train_noise_interval", nargs=3, type=int, default=[0, 75, 15],   help='训练的噪声间隔')
-    parser.add_argument("--val_noise_interval", nargs=3, type=int, default=[0, 60, 30],     help='验证的噪声间隔')
-    parser.add_argument("--batch_size", type=int, default=256,                              help='批次大小')
-    parser.add_argument("--epoches", type=int, default=80,                                  help='训练轮次数')
-    parser.add_argument("--learning_rate", type=float, default=1e-3,                        help='Adam 初始学习率')
-    parser.add_argument("--save_checkpoints", type=int, default=5,                          help='多少个轮次保存检查点')
+    parser.add_argument("--train_path", type=str, default='./train_data/',                  help='Train dataset dir.')
+    parser.add_argument("--is_gray", action='store_true',                                   help='Train gray/rgb model.')
+    parser.add_argument("--patch_size", type=int, default=32,                               help='Uniform size of training images patches.')
+    parser.add_argument("--train_noise_interval", nargs=3, type=int, default=[0, 75, 15],   help='Train dataset noise sigma set interval.')
+    parser.add_argument("--val_noise_interval", nargs=3, type=int, default=[0, 60, 30],     help='Validation dataset noise sigma set interval.')
+    parser.add_argument("--batch_size", type=int, default=256,                              help='Batch size for training.')
+    parser.add_argument("--epoches", type=int, default=80,                                  help='Total number of training epoches.')
+    parser.add_argument("--val_epoch", type=int, default=5,                                 help='Total number of validation epoches.')
+    parser.add_argument("--learning_rate", type=float, default=1e-3,                        help='The initial learning rate for Adam.')
+    parser.add_argument("--save_checkpoints", type=int, default=5,                          help='Save checkpoint every epoch.')
 
     # Test
-    parser.add_argument("--test_path", type=str, default='./test_data/color.png',           help='测试图片路径')
-    parser.add_argument("--noise_sigma", type=float, default=25,                            help='测试输入的噪声等级')
-    parser.add_argument('--add_noise', action='store_true',                                 help='是否添加噪声')
+    parser.add_argument("--test_path", type=str, default='./test_data/color.png',           help='Test image path.')
+    parser.add_argument("--noise_sigma", type=float, default=25,                            help='Input uniform noise sigma for test.')
+    parser.add_argument('--add_noise', action='store_true',                                 help='Add noise_sigma to input or not.')
 
     # Global
-    parser.add_argument("--model_path", type=str, default='./models/',                      help='保存或者测试用的模型路径')
-    parser.add_argument("--use_gpu", action='store_true',                                   help='是否使用 GPU')
-    parser.add_argument("--is_train", action='store_true',                                  help='是否训练')
-    parser.add_argument("--is_test", action='store_true',                                   help='是否测试')
+    parser.add_argument("--model_path", type=str, default='./models/',                      help='Model loading and saving path.')
+    parser.add_argument("--use_gpu", action='store_true',                                   help='Train and test using GPU.')
+    parser.add_argument("--is_train", action='store_true',                                  help='Do train.')
+    parser.add_argument("--is_test", action='store_true',                                   help='Do test.')
 
     args = parser.parse_args()
     assert (args.is_train or args.is_test), 'is_train 和 is_test 至少有一个为 True'

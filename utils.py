@@ -8,77 +8,65 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
 from skimage.measure.simple_metrics import compare_psnr
+from skimage.util import random_noise
 
 def is_image_gray(image):
     """
-    判断 cvImage 是否为灰度
+    :param image: cv2
     """
     # a[..., 0] == a.T[0].T
-    return not(len(im.shape) == 3 and not(np.allclose(im[...,0], im[...,1]) and np.allclose(im[...,2], im[...,1])))
+    return not(len(image.shape) == 3 and not(np.allclose(image[...,0], image[...,1]) and np.allclose(image[...,2], image[...,1])))
 
-def downsample(input, noise_sigma):
+def downsample(x):
     """
-    将输入图像下采样为四张小图
-    :param input: C * H * W
-    :param noise_sigma: C * H/2 * W/2
-    :return: 4 * C * H/2 * W/2
+    :param x: (C, H, W)
+    :param noise_sigma: (C, H/2, W/2)
+    :return: (4, C, H/2, W/2)
     """
-    # noise_sigma is a list of length batch_size
-    N, C, H, W = input.size()
-    dtype = input.type()
-    sca = 2
-    sca2 = sca * sca
-    Cout = sca2 * C
-    Hout = H // sca
-    Wout = W // sca
+    # x = x[:, :, :x.shape[2] // 2 * 2, :x.shape[3] // 2 * 2]
+    N, C, W, H = x.size()
     idxL = [[0, 0], [0, 1], [1, 0], [1, 1]]
 
-    # Fill the downsampled image with zeros
-    if 'cuda' in dtype:
-        downsampledfeatures = torch.cuda.FloatTensor(N, Cout, Hout, Wout).fill_(0)
+    Cout = 4 * C
+    Wout = W // 2
+    Hout = H // 2
+
+    if 'cuda' in x.type():
+        down_features = torch.cuda.FloatTensor(N, Cout, Wout, Hout).fill_(0)
     else:
-        downsampledfeatures = torch.FloatTensor(N, Cout, Hout, Wout).fill_(0)
+        down_features = torch.FloatTensor(N, Cout, Wout, Hout).fill_(0)
+    
+    for idx in range(4):
+        down_features[:, idx:Cout:4, :, :] = x[:, :, idxL[idx][0]::2, idxL[idx][1]::2]
 
-    # Build the CxH/2xW/2 noise map
-    noise_map = noise_sigma.view(N, 1, 1, 1).repeat(1, C, Hout, Wout)
+    return down_features
 
-    # Populate output
-    for idx in range(sca2):
-        downsampledfeatures[:, idx:Cout:sca2, :, :] = input[:, :, idxL[idx][0]::sca, idxL[idx][1]::sca]
-
-    # concatenate de-interleaved mosaic with noise map
-    return torch.cat((noise_map, downsampledfeatures), 1)
-
-def upsample(input):
+def upsample(x):
     """
-    将卷积完的结果上采样
+    :param x: (n, C, W, H)
+    :return: (n, C/4, W*2, H*2)
     """
-    N, Cin, Hin, Win = input.size()
-    dtype = input.type()
-    sca = 2
-    sca2 = sca * sca
-    Cout = Cin // sca2
-    Hout = Hin * sca
-    Wout = Win * sca
+    N, Cin, Win, Hin = x.size()
     idxL = [[0, 0], [0, 1], [1, 0], [1, 1]]
+    
+    Cout = Cin // 4
+    Wout = Win * 2
+    Hout = Hin * 2
 
-    assert (Cin % sca2 == 0), 'Invalid input dimensions: number of channels should be divisible by 4'
+    up_feature = torch.zeros((N, Cout, Wout, Hout)).type(x.type())
+    for idx in range(4):
+        up_feature[:, :, idxL[idx][0]::2, idxL[idx][1]::2] = x[:, idx:Cin:4, :, :]
 
-    result = torch.zeros((N, Cout, Hout, Wout)).type(dtype)
-    for idx in range(sca2):
-        result[:, :, idxL[idx][0] :: sca, idxL[idx][1] :: sca] = input[:, idx : Cin : sca2, :, :]
-
-    return result
+    return up_feature
 
 def normalize(data):
     """
-    图像归一化
+    // variable_to_cv2_image will reshape to *255
     """
     return np.float32(data / 255)
 
 def image_to_patches(image, patch_size):
     """
-    将图片转化成区域集
     :param image: Image (C * W * H) Numpy
     :param patch_size: int
     :return: (patch_num, C, win, win)
@@ -97,37 +85,33 @@ def image_to_patches(image, patch_size):
 
 def add_batch_noise(images, noise_sigma):
     """
-    往一个批次图像中 添加相同的噪声等级
     :param images: Image (n, C, W, H) Tensor
     :return: Image (n, C, W, H)
     """
-    new_images = []
-    for image in images:
-        noise = np.random.random(image.shape) * noise_sigma
-        new_images.append(image.numpy() + noise)
-    return torch.FloatTensor(new_images)
+    images = random_noise(images.numpy(), mode='gaussian', var=noise_sigma)
+    return torch.FloatTensor(images)
 
 def batch_psnr(img, imclean, data_range):
     """
-    计算整个批次的 PSNR
+    add the whole batch's PSNR
     """
     img_cpu = img.data.cpu().numpy().astype(np.float32)
     imgclean = imclean.data.cpu().numpy().astype(np.float32)
     psnr = 0
     for i in range(img_cpu.shape[0]):
         psnr += compare_psnr(imgclean[i, :, :, :], img_cpu[i, :, :, :], data_range=data_range)
-    return psnr/img_cpu.shape[0]
+    return psnr / img_cpu.shape[0]
 
 def variable_to_cv2_image(varim):
     """
-    Variable -> Cv2
+    Norm Variable -> Cv2
     """
     nchannels = varim.size()[1]
     if nchannels == 1:
         res = (varim.data.cpu().numpy()[0, 0, :] * 255.).clip(0, 255).astype(np.uint8)
     elif nchannels == 3:
         res = varim.data.cpu().numpy()[0]
-        res = cv2.cvtColor(res.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
+        res = cv2.cvtColor(res.transpose(2, 1, 0), cv2.COLOR_RGB2BGR)
         res = (res*255.).clip(0, 255).astype(np.uint8)
     else:
         raise Exception('Number of color channels not supported')

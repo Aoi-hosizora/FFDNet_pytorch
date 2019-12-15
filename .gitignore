@@ -1,7 +1,10 @@
 __pycache__/
 
-test_data/
-train_data/
-models/
+models/*.*
+train_data/gray/train/*.*
+train_data/gray/val/*.*
+train_data/rgb/train/*.*
+train_data/rgb/val/*.*
+!.gitkeep
 
 *.zip
